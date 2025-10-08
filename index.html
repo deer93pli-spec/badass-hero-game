@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Badass Hero Online</title>
+  <style>
+    html,body { height:100%; margin:0; overflow:hidden; font-family:sans-serif; background: #051630; }
+    #ui { position:fixed; left:12px; top:12px; z-index:20; color:#fff; text-shadow:0 2px 6px rgba(0,0,0,.7); }
+    #start { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:30;
+             background:linear-gradient(135deg,#ff416c,#ff7b45); color:#fff; padding:16px 22px;
+             border-radius:12px; cursor:pointer; font-weight:700; box-shadow:0 6px 30px rgba(0,0,0,.5); }
+    #hint { position:fixed; left:50%; top:calc(50% + 70px); transform:translateX(-50%); color:#fff; z-index:29 }
+    #footer { position:fixed; left:0; right:0; bottom:10px; text-align:center; color:rgba(255,255,255,0.85); z-index:20; }
+    .bar { background:rgba(0,0,0,0.35); padding:8px; border-radius:8px; }
+    canvas { display:block }
+  </style>
+</head>
+<body>
+  <div id="ui" class="bar">Score: <span id="score">0</span> • Enemies: <span id="enemies">5</span></div>
+  <div id="footer">WASD: Move • Mouse: Look • Click: Shoot • Space: Dash • R: Super Blast</div>
+  <div id="start">Start — Be the Badass Hero</div>
+  <div id="hint">(Tap Start / Click → then click inside to lock mouse)</div>
+
+  <script src="https://unpkg.com/three@0.154.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.154.0/examples/js/controls/PointerLockControls.js"></script>
+
+  <script>
+    let scene, camera, renderer, controls;
+    const ENEMY_COUNT = 5;
+    let enemies = [], projectiles = [];
+    let score = 0, canUseSuper = true;
+    const scoreEl = document.getElementById('score');
+    const enemiesEl = document.getElementById('enemies');
+    const startBtn = document.getElementById('start');
+
+    init();
+
+    function init(){
+      scene = new THREE.Scene();
+      scene.fog = new THREE.FogExp2(0x051630, 0.0025);
+      camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.1, 1000);
+      renderer = new THREE.WebGLRenderer({antialias:true});
+      renderer.setSize(innerWidth, innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      const ambient = new THREE.AmbientLight(0x8888aa, 0.8);
+      scene.add(ambient);
+      const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+      dir.position.set(30,50,30);
+      scene.add(dir);
+
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(800,800,32,32),
+        new THREE.MeshStandardMaterial({color:0x0b4b3a, metalness:0.1, roughness:0.9})
+      );
+      ground.rotation.x = -Math.PI/2;
+      scene.add(ground);
+
+      const ringMat = new THREE.MeshStandardMaterial({color:0x220066, emissive:0x440077, emissiveIntensity:0.6, roughness:0.6});
+      const ring = new THREE.Mesh(new THREE.RingGeometry(6,16,64), ringMat);
+      ring.rotation.x = -Math.PI/2;
+      ring.position.y = 0.01;
+      scene.add(ring);
+
+      const player = createPlayer();
+
+      controls = new THREE.PointerLockControls(camera, renderer.domElement);
+      controls.getObject().position.set(0,3,30);
+      scene.add(controls.getObject());
+
+      for(let i=0; i<ENEMY_COUNT; i++) spawnEnemy();
+
+      const input = {f:false,b:false,l:false,r:false, dash:false};
+      document.addEventListener('keydown', e=>{
+        if(e.code==='KeyW') input.f=true;
+        if(e.code==='KeyS') input.b=true;
+        if(e.code==='KeyA') input.l=true;
+        if(e.code==='KeyD') input.r=true;
+        if(e.code==='Space') input.dash=true;
+        if(e.code==='KeyR') useSuperBlast();
+      });
+      document.addEventListener('keyup', e=>{
+        if(e.code==='KeyW') input.f=false;
+        if(e.code==='KeyS') input.b=false;
+        if(e.code==='KeyA') input.l=false;
+        if(e.code==='KeyD') input.r=false;
+        if(e.code==='Space') input.dash=false;
+      });
+
+      startBtn.addEventListener('click', ()=>{
+        controls.lock();
+        startBtn.style.display='none';
+        document.getElementById('hint').style.display='none';
+      });
+
+      renderer.domElement.addEventListener('click', ()=>{
+        shootEnergy();
+      });
+
+      let prev = performance.now();
+      function loop(){
+        requestAnimationFrame(loop);
+        const now = performance.now();
+        const dt = (now - prev) / 1000; prev = now;
+
+        const obj = controls.getObject();
+        const forward = new THREE.Vector3();
+        camera.getWorldDirection(forward);
+        forward.y = 0; forward.normalize();
+        const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), forward).normalize();
+
+        let speed = 20;
+        if(input.dash) speed = 60;
+
+        const moveVec = new THREE.Vector3();
+        if(input.f) moveVec.add(forward);
+        if(input.b) moveVec.sub(forward);
+        if(input.l) moveVec.sub(right);
+        if(input.r) moveVec.add(right);
+        if(moveVec.lengthSq() > 0) moveVec.normalize().multiplyScalar(speed * dt);
+        obj.position.add(moveVec);
+
+        const desiredCamPos = new THREE.Vector3().copy(obj.position).add(new THREE.Vector3(0,6,18));
+        camera.position.lerp(desiredCamPos, 0.12);
+        camera.lookAt(obj.position);
+
+        for(let i=projectiles.length-1; i>=0; i--){
+          const p = projectiles[i];
+          p.mesh.position.addScaledVector(p.dir, p.speed * dt);
+          p.life -= dt;
+
+          for(let j = enemies.length-1; j>=0; j--){
+            const e = enemies[j];
+            if(e.dead) continue;
+            if(p.mesh.position.distanceTo(e.mesh.position) < 2.0){
+              e.hp -= p.damage;
+              p.life = 0;
+              if(e.hp <= 0){
+                e.dead = true;
+                scene.remove(e.mesh);
+                score += 100;
+                scoreEl.textContent = score;
+                enemies.splice(j, 1);
+                enemiesEl.textContent = enemies.length;
+              }
+            }
+          }
+          if(p.life <= 0){
+            scene.remove(p.mesh);
+            projectiles.splice(i, 1);
+          }
+        }
+
+        for(const e of enemies){
+          if(e.dead) continue;
+          const dirToPlayer = new THREE.Vector3().subVectors(obj.position, e.mesh.position);
+          const dist = dirToPlayer.length();
+          dirToPlayer.normalize();
+          if(dist > 6) e.mesh.position.addScaledVector(dirToPlayer, e.speed * dt);
+          if(Math.random() < 0.01){
+            const bolt = createProjectile(
+              e.mesh.position.clone().add(new THREE.Vector3(0,1,0)),
+              new THREE.Vector3().subVectors(obj.position, e.mesh.position).normalize(),
+              40, 0.5
+            );
+            bolt.damage = 20;
+          }
+        }
+
+        if(Math.random() < 0.15){
+          const p = new THREE.Mesh(
+            new THREE.SphereGeometry(0.6,8,6),
+            new THREE.MeshBasicMaterial({opacity:0.18, transparent:true, emissive:0xff66aa})
+          );
+          p.position.copy(obj.position).y += 1.5;
+          scene.add(p);
+          setTimeout(()=>scene.remove(p), 350);
+        }
+
+        renderer.render(scene, camera);
+      }
+      loop();
+
+      function createPlayer(){
+        const group = new THREE.Group();
+        const shell = new THREE.Mesh(
+          new THREE.SphereGeometry(1.8,24,16),
+          new THREE.MeshStandardMaterial({color:0x111133, metalness:0.9, roughness:0.2})
+        );
+        const core = new THREE.Mesh(
+          new THREE.SphereGeometry(0.8,16,12),
+          new THREE.MeshStandardMaterial({emissive:0xff0044, emissiveIntensity:1.5, color:0x220022})
+        );
+        shell.position.y = 2.0;
+        core.position.y = 2.0;
+        group.add(shell);
+        group.add(core);
+        scene.add(group);
+        controls.getObject().add(group);
+        return group;
+      }
+
+      function spawnEnemy(){
+        const geo = new THREE.BoxGeometry(2.6,2.6,2.6);
+        const mat = new THREE.MeshStandardMaterial({color:0x223355, emissive:0x112244, roughness:0.6});
+        const mesh = new THREE.Mesh(geo, mat);
+        const angle = Math.random() * Math.PI * 2;
+        const r = 60 + Math.random() * 50;
+        mesh.position.set(Math.cos(angle)*r, 1.3, Math.sin(angle)*r);
+        scene.add(mesh);
+        const enemy = {mesh, speed: 5 + Math.random()*8, hp: 80 + Math.random()*80, dead: false};
+        enemies.push(enemy);
+        enemiesEl.textContent = enemies.length;
+      }
+
+      function createProjectile(pos, dir, speed=60, size=0.4){
+        const mat = new THREE.MeshBasicMaterial({emissive: 0xff5599});
+        const mesh = new THREE.Mesh(new THREE.SphereGeometry(size,8,6), mat);
+        mesh.position.copy(pos);
+        scene.add(mesh);
+        const p = {mesh, dir: dir.clone(), speed, life: 4, damage: 40};
+        projectiles.push(p);
+        return p;
+      }
+
+      function shootEnergy(){
+        const start = new THREE.Vector3().copy(controls.getObject().position).add(new THREE.Vector3(0,1.8,0));
+        const dir = new THREE.Vector3();
+        camera.getWorldDirection(dir);
+        dir.normalize();
+        createProjectile(start, dir, 120, 0.6);
+        const flash = new THREE.Mesh(
+          new THREE.SphereGeometry(2.2,16,12),
+          new THREE.MeshBasicMaterial({emissive:0xff66aa, transparent:true, opacity:0.12})
+        );
+        flash.position.copy(start).addScaledVector(dir,4);
+        scene.add(flash);
+        setTimeout(()=>scene.remove(flash), 120);
+      }
+
+      function useSuperBlast(){
+        if(!canUseSuper) return;
+        canUseSuper = false;
+        const center = controls.getObject().position.clone();
+        const sphere = new THREE.Mesh(
+          new THREE.SphereGeometry(1,32,24),
+          new THREE.MeshBasicMaterial({emissive:0xff3366, transparent:true, opacity:0.14})
+        );
+        sphere.position.copy(center);
+        scene.add(sphere);
+        setTimeout(()=>scene.remove(sphere), 800);
+        for(let i = enemies.length-1; i>=0; i--){
+          const e = enemies[i];
+          const d = e.mesh.position.distanceTo(center);
+          if(d < 40){
+            e.hp -= 500;
+            if(e.hp <= 0){
+              e.dead = true;
+              scene.remove(e.mesh);
+              enemies.splice(i,1);
+              score += 200;
+              scoreEl.textContent = score;
+              enemiesEl.textContent = enemies.length;
+            }
+          }
+        }
+        setTimeout(()=>{ canUseSuper = true; }, 16000);
+      }
+    }
+
+  </script>
+</body>
+</html>
